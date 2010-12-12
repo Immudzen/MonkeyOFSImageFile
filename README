@@ -1,0 +1,16 @@
+This is a small monkey patch to add blob support to OFS.Image and File
+
+This adds a new method called resave_to_blob that can be called on any Image
+or File to save them as a blob to the filesystem instead.
+
+This is my suggested upgrade script. It will convert all File and Image objects
+
+for id, obj in container.ZopeFind(container, obj_metatypes=['File', 'Image'], search_sub=1):
+    resave_to_blob = getattr(obj, 'resave_to_blob', None)
+    if resave_to_blob is not None:
+        resave_to_blob()
+return 'Done'
+
+
+The only requirements I know of is having zope 2.13 installed and working and blob support setup.
+This patch should work on zope 2.12 also but I don't know for sure.
