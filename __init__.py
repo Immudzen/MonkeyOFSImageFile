@@ -9,8 +9,6 @@ from DateTime.DateTime import DateTime
 from ZPublisher import HTTPRangeSupport
 from mimetools import choose_boundary
 
-
-
 def log(name, short="", longMessage="", error_level=zLOG.INFO, reraise=0):
     "Log an error to a file"
     log_write(name, error_level, str(short), str(longMessage), None)
