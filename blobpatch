@@ -1,0 +1,281 @@
+Index: Image.py
+===================================================================
+--- Image.py	(revision 119474)
++++ Image.py	(working copy)
+@@ -49,6 +49,8 @@
+ from zope.lifecycleevent import ObjectModifiedEvent
+ from zope.lifecycleevent import ObjectCreatedEvent
+ 
++import ZODB.blob
++
+ manage_addFileForm = DTMLFile('dtml/imageAdd',
+                               globals(),
+                               Kind='File',
+@@ -144,6 +146,12 @@
+     def id(self):
+         return self.__name__
+ 
++    def resave_to_blob(self):
++        "put the current data in a blob"
++        data = self.data
++        if data and not isinstance(data, ZODB.blob.Blob):
++            self.data = ZODB.blob.Blob(str(data))
++
+     def _if_modified_since_request_handler(self, REQUEST, RESPONSE):
+         # HTTP If-Modified-Since header handling: return True if
+         # we can handle this request by returning a 304 response
+@@ -251,33 +259,48 @@
+                     if isinstance(data, str):
+                         RESPONSE.write(data[start:end])
+                         return True
++                        
++                    elif isinstance(data, ZODB.blob.Blob):
++                        blob_file = self.data.open('r')
++                        blob_file.seek(start, 0)
++                        size = end - start
++                        chunksize = 1<<16
++                        position = start
++                        while size > 0:
++                            if (end - position) < chunksize:
++                                chunksize = (end - position)
++                                RESPONSE.write(blob_file.read(chunksize))
++                                position += chunksize
++                                size -= chunksize
++                        return True
++                        
++                    else: #handle pdata case
++                        # Linked Pdata objects. Urgh.
++                        pos = 0
++                        while data is not None:
++                            l = len(data.data)
++                            pos = pos + l
++                            if pos > start:
++                                # We are within the range
++                                lstart = l - (pos - start)
+ 
+-                    # Linked Pdata objects. Urgh.
+-                    pos = 0
+-                    while data is not None:
+-                        l = len(data.data)
+-                        pos = pos + l
+-                        if pos > start:
+-                            # We are within the range
+-                            lstart = l - (pos - start)
++                                if lstart < 0: lstart = 0
+ 
+-                            if lstart < 0: lstart = 0
++                                # find the endpoint
++                                if end <= pos:
++                                    lend = l - (pos - end)
+ 
+-                            # find the endpoint
+-                            if end <= pos:
+-                                lend = l - (pos - end)
++                                    # Send and end transmission
++                                    RESPONSE.write(data[lstart:lend])
++                                    break
+ 
+-                                # Send and end transmission
+-                                RESPONSE.write(data[lstart:lend])
+-                                break
++                                # Not yet at the end, transmit what we have.
++                                RESPONSE.write(data[lstart:])
+ 
+-                            # Not yet at the end, transmit what we have.
+-                            RESPONSE.write(data[lstart:])
++                            data = data.next
+ 
+-                        data = data.next
++                        return True
+ 
+-                    return True
+-
+                 else:
+                     boundary = choose_boundary()
+ 
+@@ -322,6 +345,20 @@
+                         if isinstance(data, str):
+                             RESPONSE.write(data[start:end])
+ 
++                        elif isinstance(data, ZODB.blob.Blob):
++                            blob_file = self.data.open('r')
++                            blob_file.seek(start, 0)
++                            size = end - start
++                            chunksize = 1<<16
++                            position = start
++                            while size > 0:
++                                if (end - position) < chunksize:
++                                    chunksize = (end - position)
++                                    RESPONSE.write(blob_file.read(chunksize))
++                                    position += chunksize
++                                    size -= chunksize
++                            return True
++                            
+                         else:
+                             # Yippee. Linked Pdata objects. The following
+                             # calculations allow us to fast-forward through the
+@@ -364,7 +401,7 @@
+ 
+                     # Do not keep the link references around.
+                     del pdata_map
+-
++                        
+                     RESPONSE.write('\r\n--%s--\r\n' % boundary)
+                     return True
+ 
+@@ -386,7 +423,7 @@
+             # unfortunately.
+             self.ZCacheable_set(None)
+             return ''
+-
++        
+         if self.precondition and hasattr(self, str(self.precondition)):
+             # Grab whatever precondition was defined and then
+             # execute it.  The precondition will raise an exception
+@@ -396,11 +433,11 @@
+                 c(REQUEST['PARENTS'][1],REQUEST)
+             else:
+                 c()
+-
++        
+         if self._range_request_handler(REQUEST, RESPONSE):
+             # we served a chunk of content in response to a range request.
+             return ''
+-
++        
+         RESPONSE.setHeader('Last-Modified', rfc1123_date(self._p_mtime))
+         RESPONSE.setHeader('Content-Type', self.content_type)
+         RESPONSE.setHeader('Content-Length', self.size)
+@@ -414,18 +451,23 @@
+                 # something implementing the IStreamIterator interface
+                 # from a "FileCacheManager"
+                 return result
+-
++        
+         self.ZCacheable_set(None)
+-
+-        data=self.data
++        data = self.data
+         if isinstance(data, str):
+             RESPONSE.setBase(None)
+             return data
+-
+-        while data is not None:
+-            RESPONSE.write(data.data)
+-            data=data.next
+-
++        
++        elif isinstance(data, ZODB.blob.Blob):
++            RESPONSE.setBase(None)
++            filename = data._p_blob_uncommitted or data.committed()
++            return filestream_iterator(filename, 'rb')
++        
++        else:
++            while data is not None:
++                RESPONSE.write(data.data)
++                data=data.next
++                
+         return ''
+ 
+     security.declareProtected(View, 'view_image_or_file')
+@@ -452,7 +494,7 @@
+         if content_type is not None: self.content_type=content_type
+         if size is None: size=len(data)
+         self.size=size
+-        self.data=data
++        self.data = ZODB.blob.Blob(data)
+         self.ZCacheable_invalidate()
+         self.ZCacheable_set(None)
+         self.http__refreshEtag()
+@@ -513,73 +555,22 @@
+         return content_type
+ 
+     def _read_data(self, file):
+-        import transaction
+-
+-        n=1 << 16
+-
+         if isinstance(file, str):
+             size=len(file)
+-            if size < n: return file, size
+-            # Big string: cut it into smaller chunks
+-            file = StringIO(file)
++            return file, size
+ 
+         if isinstance(file, FileUpload) and not file:
+             raise ValueError, 'File not specified'
+-
+-        if hasattr(file, '__class__') and file.__class__ is Pdata:
+-            size=len(file)
+-            return file, size
+-
++        
+         seek=file.seek
+         read=file.read
+ 
+         seek(0,2)
+         size=end=file.tell()
+ 
+-        if size <= 2*n:
+-            seek(0)
+-            if size < n: return read(size), size
+-            return Pdata(read(size)), size
++        seek(0)
++        return read(size), size
+ 
+-        # Make sure we have an _p_jar, even if we are a new object, by
+-        # doing a sub-transaction commit.
+-        transaction.savepoint(optimistic=True)
+-
+-        if self._p_jar is None:
+-            # Ugh
+-            seek(0)
+-            return Pdata(read(size)), size
+-
+-        # Now we're going to build a linked list from back
+-        # to front to minimize the number of database updates
+-        # and to allow us to get things out of memory as soon as
+-        # possible.
+-        next = None
+-        while end > 0:
+-            pos = end-n
+-            if pos < n:
+-                pos = 0 # we always want at least n bytes
+-            seek(pos)
+-
+-            # Create the object and assign it a next pointer
+-            # in the same transaction, so that there is only
+-            # a single database update for it.
+-            data = Pdata(read(end-pos))
+-            self._p_jar.add(data)
+-            data.next = next
+-
+-            # Save the object so that we can release its memory.
+-            transaction.savepoint(optimistic=True)
+-            data._p_deactivate()
+-            # The object should be assigned an oid and be a ghost.
+-            assert data._p_oid is not None
+-            assert data._p_state == -1
+-
+-            next = data
+-            end = pos
+-
+-        return next, size
+-
+     security.declareProtected(delete_objects, 'DELETE')
+ 
+     security.declareProtected(change_images_and_files, 'PUT')
+@@ -810,11 +801,11 @@
+         if isinstance(data, unicode):
+             raise TypeError('Data can only be str or file-like.  '
+                             'Unicode objects are expressly forbidden.')
+-        
++    
+         if size is None: size=len(data)
+ 
+         self.size=size
+-        self.data=data
++        self.data = ZODB.blob.Blob(data)
+ 
+         ct, width, height = getImageInfo(data)
+         if ct:
