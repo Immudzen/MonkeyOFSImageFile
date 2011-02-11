@@ -14,3 +14,36 @@ return 'Done'
 
 The only requirements I know of is having zope 2.13 installed and working and blob support setup.
 This patch should work on zope 2.12 also but I don't know for sure.
+
+example zope.conf db section for blobs
+
+<zodb_db main>
+    mount-point /
+    cache-size 5000
+    <zeoclient>
+      blob-dir /var/lib/zope2.12/blobs
+      shared-blob-dir true
+
+      server /var/lib/zope2.12/zeo/main/main.soc
+      storage 1
+      name main
+      var $INSTANCE/var
+      cache-size 0 
+    </zeoclient>
+  </zodb_db>
+
+
+example zeo.conf db section for blobs
+
+<blobstorage 1>
+<filestorage>
+  path $INSTANCE/var/Data.fs
+</filestorage>
+blob-dir /var/lib/zope2.12/blobs
+</blobstorage>
+
+
+A pure zope example I don't have right now.
+
+The above setup with zeo makes it so that zope and zeo will share the same blob dir so that blobs
+are not sent over zeo.
