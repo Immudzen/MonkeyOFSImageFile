@@ -1,5 +1,6 @@
 import ZODB.blob
 import OFS.Image
+from OFS.Image import getImageInfo
 from ZPublisher.HTTPRequest import FileUpload
 from zLOG.EventLogger import log_write
 import zLOG
