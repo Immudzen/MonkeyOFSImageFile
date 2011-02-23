@@ -12,6 +12,13 @@ for id, obj in container.ZopeFind(container, obj_metatypes=['File', 'Image'], se
 return 'Done'
 
 
+If you have a large database or a system where the above script could cause a timeout that would
+cause problems I have created a script that you can run from zopectl
+
+bin/zopectl run /path/to/upgrade_blob.py
+
+The upgrade_blob.py file is part of the included files
+
 The only requirements I know of is having zope 2.13 installed and working and blob support setup.
 This patch should work on zope 2.12 also but I don't know for sure.
 
