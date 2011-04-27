@@ -1,30 +1,18 @@
 Index: Image.py
 ===================================================================
---- Image.py	(revision 119474)
+--- Image.py	(revision 121465)
 +++ Image.py	(working copy)
-@@ -49,6 +49,8 @@
+@@ -49,6 +49,9 @@
  from zope.lifecycleevent import ObjectModifiedEvent
  from zope.lifecycleevent import ObjectCreatedEvent
  
++from ZODB.interfaces import IBlobStorage
 +import ZODB.blob
 +
  manage_addFileForm = DTMLFile('dtml/imageAdd',
                                globals(),
                                Kind='File',
-@@ -144,6 +146,12 @@
-     def id(self):
-         return self.__name__
- 
-+    def resave_to_blob(self):
-+        "put the current data in a blob"
-+        data = self.data
-+        if data and not isinstance(data, ZODB.blob.Blob):
-+            self.data = ZODB.blob.Blob(str(data))
-+
-     def _if_modified_since_request_handler(self, REQUEST, RESPONSE):
-         # HTTP If-Modified-Since header handling: return True if
-         # we can handle this request by returning a 304 response
-@@ -251,33 +259,48 @@
+@@ -251,33 +254,48 @@
                      if isinstance(data, str):
                          RESPONSE.write(data[start:end])
                          return True
@@ -93,7 +81,7 @@ Index: Image.py
                  else:
                      boundary = choose_boundary()
  
-@@ -322,6 +345,20 @@
+@@ -322,6 +340,20 @@
                          if isinstance(data, str):
                              RESPONSE.write(data[start:end])
  
@@ -114,7 +102,7 @@ Index: Image.py
                          else:
                              # Yippee. Linked Pdata objects. The following
                              # calculations allow us to fast-forward through the
-@@ -364,7 +401,7 @@
+@@ -364,7 +396,7 @@
  
                      # Do not keep the link references around.
                      del pdata_map
@@ -123,7 +111,7 @@ Index: Image.py
                      RESPONSE.write('\r\n--%s--\r\n' % boundary)
                      return True
  
-@@ -386,7 +423,7 @@
+@@ -386,7 +418,7 @@
              # unfortunately.
              self.ZCacheable_set(None)
              return ''
@@ -132,7 +120,7 @@ Index: Image.py
          if self.precondition and hasattr(self, str(self.precondition)):
              # Grab whatever precondition was defined and then
              # execute it.  The precondition will raise an exception
-@@ -396,11 +433,11 @@
+@@ -396,11 +428,11 @@
                  c(REQUEST['PARENTS'][1],REQUEST)
              else:
                  c()
@@ -146,7 +134,7 @@ Index: Image.py
          RESPONSE.setHeader('Last-Modified', rfc1123_date(self._p_mtime))
          RESPONSE.setHeader('Content-Type', self.content_type)
          RESPONSE.setHeader('Content-Length', self.size)
-@@ -414,18 +451,23 @@
+@@ -414,18 +446,23 @@
                  # something implementing the IStreamIterator interface
                  # from a "FileCacheManager"
                  return result
@@ -178,104 +166,99 @@ Index: Image.py
          return ''
  
      security.declareProtected(View, 'view_image_or_file')
-@@ -452,7 +494,7 @@
+@@ -440,7 +477,7 @@
+         """ Allow file objects to be searched.
+         """
+         if self.content_type.startswith('text/'):
+-            return str(self.data)
++            return self.data.open('r').read() if isinstance(self.data, ZODB.blob.Blob) else str(self.data)
+         return ''
+ 
+     security.declarePrivate('update_data')
+@@ -452,11 +489,23 @@
          if content_type is not None: self.content_type=content_type
          if size is None: size=len(data)
          self.size=size
 -        self.data=data
-+        self.data = ZODB.blob.Blob(data)
++        if data:
++            if IBlobStorage.providedBy(self._p_jar.db().storage):
++                self.data = ZODB.blob.Blob(data)
++            else:
++                self.data = data
++        else:
++            self.data = ''
          self.ZCacheable_invalidate()
          self.ZCacheable_set(None)
          self.http__refreshEtag()
-@@ -513,73 +555,22 @@
-         return content_type
  
-     def _read_data(self, file):
--        import transaction
--
--        n=1 << 16
--
++    def resave_to_blob(self):
++        "put the current data in a blob"
++        data = self.data
++        if data and not isinstance(data, ZODB.blob.Blob) and IBlobStorage.providedBy(self._p_jar.db().storage):
++            self.data = ZODB.blob.Blob(str(data))
++
+     security.declareProtected(change_images_and_files, 'manage_edit')
+     def manage_edit(self, title, content_type, precondition='',
+                     filedata=None, REQUEST=None):
+@@ -517,9 +566,15 @@
+ 
+         n=1 << 16
+ 
++        # Make sure we have an _p_jar, even if we are a new object, by
++        # doing a sub-transaction commit.
++        transaction.savepoint(optimistic=True)
++
          if isinstance(file, str):
              size=len(file)
 -            if size < n: return file, size
--            # Big string: cut it into smaller chunks
--            file = StringIO(file)
-+            return file, size
++            if size<n or IBlobStorage.providedBy(self._p_jar.db().storage):
++                #for blobs we don't have to cut anything up or if the size<n
++                return file,size
+             # Big string: cut it into smaller chunks
+             file = StringIO(file)
  
-         if isinstance(file, FileUpload) and not file:
-             raise ValueError, 'File not specified'
--
--        if hasattr(file, '__class__') and file.__class__ is Pdata:
--            size=len(file)
--            return file, size
--
-+        
-         seek=file.seek
-         read=file.read
- 
+@@ -536,15 +591,17 @@
          seek(0,2)
          size=end=file.tell()
  
--        if size <= 2*n:
--            seek(0)
--            if size < n: return read(size), size
--            return Pdata(read(size)), size
-+        seek(0)
-+        return read(size), size
++        if IBlobStorage.providedBy(self._p_jar.db().storage):
++            seek(0)
++            return read(size), size
++
+         if size <= 2*n:
+             seek(0)
+             if size < n: return read(size), size
+             return Pdata(read(size)), size
  
 -        # Make sure we have an _p_jar, even if we are a new object, by
 -        # doing a sub-transaction commit.
 -        transaction.savepoint(optimistic=True)
--
--        if self._p_jar is None:
--            # Ugh
--            seek(0)
--            return Pdata(read(size)), size
--
--        # Now we're going to build a linked list from back
--        # to front to minimize the number of database updates
--        # and to allow us to get things out of memory as soon as
--        # possible.
--        next = None
--        while end > 0:
--            pos = end-n
--            if pos < n:
--                pos = 0 # we always want at least n bytes
--            seek(pos)
--
--            # Create the object and assign it a next pointer
--            # in the same transaction, so that there is only
--            # a single database update for it.
--            data = Pdata(read(end-pos))
--            self._p_jar.add(data)
--            data.next = next
--
--            # Save the object so that we can release its memory.
--            transaction.savepoint(optimistic=True)
--            data._p_deactivate()
--            # The object should be assigned an oid and be a ghost.
--            assert data._p_oid is not None
--            assert data._p_state == -1
--
--            next = data
--            end = pos
--
--        return next, size
--
-     security.declareProtected(delete_objects, 'DELETE')
  
-     security.declareProtected(change_images_and_files, 'PUT')
-@@ -810,11 +801,11 @@
-         if isinstance(data, unicode):
-             raise TypeError('Data can only be str or file-like.  '
-                             'Unicode objects are expressly forbidden.')
--        
-+    
++
+         if self._p_jar is None:
+             # Ugh
+             seek(0)
+@@ -621,7 +678,7 @@
+         return self.content_type
+ 
+ 
+-    def __str__(self): return str(self.data)
++    def __str__(self): return self.data.open('r').read() if isinstance(self.data, ZODB.blob.Blob) else str(self.data)
+     def __len__(self): return 1
+ 
+     security.declareProtected(ftp_access, 'manage_FTPstat')
+@@ -814,7 +871,13 @@
          if size is None: size=len(data)
  
          self.size=size
 -        self.data=data
-+        self.data = ZODB.blob.Blob(data)
++        if data:
++            if IBlobStorage.providedBy(self._p_jar.db().storage):
++                self.data = ZODB.blob.Blob(data)
++            else:
++                self.data = data
++        else:
++            self.data = ''
  
          ct, width, height = getImageInfo(data)
          if ct:
