@@ -1,5 +1,6 @@
 import ZODB.blob
 import OFS.Image
+from OFS.Image import Pdata
 from OFS.Image import getImageInfo
 from ZPublisher.HTTPRequest import FileUpload
 from zLOG.EventLogger import log_write
@@ -9,6 +10,8 @@ from ZPublisher.Iterators import filestream_iterator
 from DateTime.DateTime import DateTime
 from ZPublisher import HTTPRangeSupport
 from mimetools import choose_boundary
+from zope.interface import implementedBy
+from ZODB.interfaces import IBlobStorage
 
 def log(name, short="", longMessage="", error_level=zLOG.INFO, reraise=0):
     "Log an error to a file"
@@ -310,7 +313,13 @@ def file_update_data(self, data, content_type=None, size=None):
     if content_type is not None: self.content_type=content_type
     if size is None: size=len(data)
     self.size=size
-    self.data = ZODB.blob.Blob(data)
+    if data:
+        if IBlobStorage.providedBy(self._p_jar.db().storage):
+            self.data = ZODB.blob.Blob(data)
+        else:
+            self.data = data
+    else:
+        self.data = ''
     self.ZCacheable_invalidate()
     self.ZCacheable_set(None)
     self.http__refreshEtag()
@@ -318,7 +327,7 @@ def file_update_data(self, data, content_type=None, size=None):
 def resave_to_blob(self):
     "put the current data in a blob"
     data = self.data
-    if data and not isinstance(data, ZODB.blob.Blob):
+    if data and not isinstance(data, ZODB.blob.Blob) and IBlobStorage.providedBy(self._p_jar.db().storage):
         self.data = ZODB.blob.Blob(str(data))
 
 def image_update_data(self, data, content_type=None, size=None):
@@ -329,7 +338,13 @@ def image_update_data(self, data, content_type=None, size=None):
     if size is None: size=len(data)
 
     self.size=size
-    self.data = ZODB.blob.Blob(data)
+    if data:
+        if IBlobStorage.providedBy(self._p_jar.db().storage):
+            self.data = ZODB.blob.Blob(data)
+        else:
+            self.data = data
+    else:
+        self.data = ''
 
     ct, width, height = getImageInfo(data)
     if ct:
@@ -346,25 +361,96 @@ def image_update_data(self, data, content_type=None, size=None):
     self.http__refreshEtag()
 
 def _read_data(self, file):
+    import transaction
+
+    n=1 << 16
+
+    # Make sure we have an _p_jar, even if we are a new object, by
+    # doing a sub-transaction commit.
+    transaction.savepoint(optimistic=True)
+
     if isinstance(file, str):
         size=len(file)
-        return file, size
+        if size<n or IBlobStorage.providedBy(self._p_jar.db().storage):
+            #for blobs we don't have to cut anything up or if the size<n
+            return file,size
+        # Big string: cut it into smaller chunks
+        file = StringIO(file)
 
     if isinstance(file, FileUpload) and not file:
         raise ValueError, 'File not specified'
-    
+
+    if hasattr(file, '__class__') and file.__class__ is Pdata:
+        size=len(file)
+        return file, size
+
     seek=file.seek
     read=file.read
 
     seek(0,2)
     size=end=file.tell()
 
-    seek(0)
-    return read(size), size
+    if IBlobStorage.providedBy(self._p_jar.db().storage):
+        seek(0)
+        return read(size), size
+
+    if size <= 2*n:
+        seek(0)
+        if size < n: return read(size), size
+        return Pdata(read(size)), size
+
+
+
+    if self._p_jar is None:
+        # Ugh
+        seek(0)
+        return Pdata(read(size)), size
+
+    # Now we're going to build a linked list from back
+    # to front to minimize the number of database updates
+    # and to allow us to get things out of memory as soon as
+    # possible.
+    next = None
+    while end > 0:
+        pos = end-n
+        if pos < n:
+            pos = 0 # we always want at least n bytes
+        seek(pos)
+
+        # Create the object and assign it a next pointer
+        # in the same transaction, so that there is only
+        # a single database update for it.
+        data = Pdata(read(end-pos))
+        self._p_jar.add(data)
+        data.next = next
+
+        # Save the object so that we can release its memory.
+        transaction.savepoint(optimistic=True)
+        data._p_deactivate()
+        # The object should be assigned an oid and be a ghost.
+        assert data._p_oid is not None
+        assert data._p_state == -1
+
+        next = data
+        end = pos
+
+    return next, size
+
+def file__str__(self): 
+    return self.data.open('r').read() if isinstance(self.data, ZODB.blob.Blob) else str(self.data)
+
+def file_PrincipiaSearchSource(self):
+    """ Allow file objects to be searched.
+    """
+    if self.content_type.startswith('text/'):
+        return self.data.open('r').read() if isinstance(self.data, ZODB.blob.Blob) else str(self.data)
+    return ''
 
 OFS.Image.File._range_request_handler = _range_request_handler
 OFS.Image.File.index_html =  index_html
 OFS.Image.File.update_data = file_update_data
 OFS.Image.File.resave_to_blob = resave_to_blob
 OFS.Image.File._read_data = _read_data
+OFS.Image.File.__str__ = file__str__
+OFS.Image.File.PrincipiaSearchSource = file_PrincipiaSearchSource
 OFS.Image.Image.update_data = image_update_data
