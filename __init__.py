@@ -105,9 +105,9 @@ def _range_request_handler(self, REQUEST, RESPONSE):
                     while size > 0:
                         if (end - position) < chunksize:
                             chunksize = (end - position)
-                            RESPONSE.write(blob_file.read(chunksize))
-                            position += chunksize
-                            size -= chunksize
+                        RESPONSE.write(blob_file.read(chunksize))
+                        position += chunksize
+                        size -= chunksize
                     return True
                     
                 else: #handle pdata case
@@ -190,9 +190,9 @@ def _range_request_handler(self, REQUEST, RESPONSE):
                         while size > 0:
                             if (end - position) < chunksize:
                                 chunksize = (end - position)
-                                RESPONSE.write(blob_file.read(chunksize))
-                                position += chunksize
-                                size -= chunksize
+                            RESPONSE.write(blob_file.read(chunksize))
+                            position += chunksize
+                            size -= chunksize
                         return True
                         
                     else:
